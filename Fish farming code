@@ -1,0 +1,359 @@
+#include <Arduino.h>
+#include <DallasTemperature.h>
+#include <LiquidCrystal_I2C.h>
+#include <OneWire.h>
+#include <RTClib.h>
+#include <Wire.h>
+#include <Servo.h>
+
+#define ESP_SERIAL Serial
+#define LDR_IN_PIN A1
+#define LDR_OUT_PIN A2
+
+#define ULTRA_1_TRIG_PIN 10
+#define ULTRA_1_ECHO_PIN 11
+
+#define ULTRA_2_TRIG_PIN 13
+#define ULTRA_2_ECHO_PIN 12
+
+#define HEATER 2
+#define PUMP_COOLER 7
+#define PUMP_ACID 5
+#define PUMP_BASE 3
+#define PUMP_OUTPUT 4
+#define PUMP_HOT 8
+
+int ldr_in_pin_value = 0;
+int ldr_out_pin_value = 0;
+
+RTC_DS1307 rtc;
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+#define ONE_WIRE_BUS 6
+
+OneWire oneWire(ONE_WIRE_BUS);
+
+DallasTemperature sensors(&oneWire);
+
+enum class WATER_LEVEL { EMPTY, MIDDLE, FULL };
+WATER_LEVEL fish_water_level_state = WATER_LEVEL::EMPTY;
+WATER_LEVEL hot_water_level_state = WATER_LEVEL::EMPTY;
+
+#define PH_SENSOR_PIN A0
+
+float ph_value = 0;
+unsigned long int avgval;
+int buffer_arr[10], temp;
+float ph_act;
+float calibration_value = 25.34 - 0.7;
+
+#define mySSID "SSID"             // WiFi SSID
+#define myPWD ""        // WiFi Password
+#define myAPI "2T5YJD9XFES0N7OW"  // API Key
+#define myHOST "api.thingspeak.com"
+#define myPORT "80"
+
+unsigned long int displayMillis = 0;
+unsigned long int previous_millis = 0;
+unsigned long int previous_millis2 = 0;
+int step = 0;
+
+Servo myServo;
+
+void espData(const String &command, const unsigned int timeout);
+int distance_cm(int TRIG_PIN, int ECHO_PIN);
+WATER_LEVEL get_water_level(int TRIG_PIN, int ECHO_PIN);
+void getPH();
+
+void setup() {
+  myServo.attach(9);
+  lcd.init();
+  lcd.backlight();
+  ESP_SERIAL.begin(115200);
+  pinMode(LDR_IN_PIN, INPUT);
+  pinMode(LDR_OUT_PIN, INPUT);
+  pinMode(ULTRA_1_TRIG_PIN, OUTPUT);
+  pinMode(ULTRA_1_ECHO_PIN, INPUT);
+  pinMode(ULTRA_2_TRIG_PIN, OUTPUT);
+  pinMode(ULTRA_2_ECHO_PIN, INPUT);
+  pinMode(HEATER, OUTPUT);
+  pinMode(PUMP_COOLER, OUTPUT);
+  pinMode(PUMP_OUTPUT, OUTPUT);
+  pinMode(PUMP_ACID, OUTPUT);
+  pinMode(PUMP_BASE, OUTPUT);
+  pinMode(PUMP_HOT, OUTPUT);
+
+  espData(F("AT+RST"), 1000);       // Reset the ESP8266 module
+  espData(F("AT+CWMODE=1"), 1000);  // Set the ESP mode as station mode
+  espData(F("AT+CWJAP=\"" mySSID "\",\"" myPWD "\""),
+          1000);  // Connect to WiFi network
+  int count = 0;
+  bool connected = true;
+  lcd.clear();
+  lcd.print(F("Connecting..."));
+  while (!ESP_SERIAL.find("OK")) {
+    espData(F("AT+CWJAP=\"" mySSID "\",\"" myPWD "\""),
+            1000);  // Connect to WiFi network
+    count++;
+    if (count == 10) {
+      connected = false;
+      break;
+    }
+  }
+  delay(1000);
+  lcd.clear();
+  if (connected) {
+    lcd.print(F("WiFi"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Connected"));
+  } else {
+    lcd.print(F("WiFi not"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Connected"));
+  }
+  delay(2000);
+  lcd.clear();
+
+  sensors.begin();
+
+  lcd.print(F("Chidiebube C.Onwugbufor"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("16/42917u/2"));
+  lcd.setCursor(0, 2);
+  lcd.print(F("Hosea Yacham Musa"));
+  lcd.setCursor(0, 3);
+  lcd.print(F("18/54605D/2"));
+  delay(3000);
+  lcd.clear();
+
+  lcd.print(F("Fadlurahman Tajudeen"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("17/47275U/2"));
+  delay(3000);
+  lcd.clear();
+
+  lcd.print(F("Supervised by:"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Engr. Yawale BabawuroZ"));
+  delay(3000);
+  lcd.clear();
+
+//   if (!rtc.begin()) {
+//     lcd.print(F("RTC Error"));
+//     while (1);
+//   }
+}
+
+void loop() {
+  fish_water_level_state = get_water_level(ULTRA_1_TRIG_PIN, ULTRA_1_ECHO_PIN);
+  hot_water_level_state = get_water_level(ULTRA_2_TRIG_PIN, ULTRA_2_ECHO_PIN);
+  sensors.requestTemperatures();
+  float tempc = sensors.getTempCByIndex(0);
+  getPH();
+
+  bool is_water_dirty;
+  bool is_night = false;
+
+  ldr_in_pin_value = analogRead(LDR_IN_PIN);
+  ldr_out_pin_value = analogRead(LDR_OUT_PIN);
+
+  if (ldr_out_pin_value >= 100) {  // LDR OUT
+    is_night = false;
+
+    if (ldr_in_pin_value < 350) {  // LDR IN
+      is_water_dirty = true;
+    } else {
+      is_water_dirty = false;
+    }
+  } else {
+    is_night = true;
+  }
+
+  if (millis() - displayMillis > 2000) {
+    lcd.clear();
+
+    switch (step) {
+      case 0:
+        lcd.print(F("Fish Tank: "));
+        if (fish_water_level_state == WATER_LEVEL::EMPTY) {
+          lcd.print(F("Empty"));
+        } else if (fish_water_level_state == WATER_LEVEL::MIDDLE) {
+          lcd.print(F("Middle"));
+        } else if (fish_water_level_state == WATER_LEVEL::FULL) {
+          lcd.print(F("Full"));
+        }
+        lcd.setCursor(0, 1);
+        lcd.print(F("Hot Tank: "));
+        if (hot_water_level_state == WATER_LEVEL::EMPTY) {
+          lcd.print(F("Empty"));
+        } else if (hot_water_level_state == WATER_LEVEL::MIDDLE) {
+          lcd.print(F("Middle"));
+        } else if (hot_water_level_state == WATER_LEVEL::FULL) {
+          lcd.print(F("Full"));
+        }
+        break;
+      case 1:
+        lcd.print(F("Temp: "));
+        lcd.print(tempc);
+        lcd.print((char)176);
+        lcd.print(F("C"));
+        lcd.setCursor(0, 1);
+        lcd.print(F("PH: "));
+        lcd.print(ph_value);
+        break;
+      case 2:
+        lcd.print(F("Water: "));
+        if (is_water_dirty) {
+          lcd.print(F("Dirty"));
+        } else {
+          lcd.print(F("Clean"));
+        }
+        lcd.setCursor(0, 1);
+        lcd.print(F("Light: "));
+        if (is_night) {
+          lcd.print(F("Night"));
+        } else {
+          lcd.print(F("Day"));
+        }
+        break;
+    }
+
+    step++;
+    if (step > 2) {
+      step = 0;
+    }
+    displayMillis = millis();
+  }
+
+  if (is_water_dirty && !is_night &&
+      fish_water_level_state != WATER_LEVEL::EMPTY) {
+    digitalWrite(PUMP_OUTPUT, HIGH);
+    digitalWrite(PUMP_COOLER, LOW);
+    digitalWrite(PUMP_HOT, LOW);
+    digitalWrite(PUMP_ACID, LOW);
+    digitalWrite(PUMP_BASE, LOW);
+  } else if (tempc < 54 && hot_water_level_state != WATER_LEVEL::EMPTY &&
+             fish_water_level_state != WATER_LEVEL::FULL) {
+    digitalWrite(HEATER, HIGH);
+    delay(10000);
+    digitalWrite(HEATER, LOW);
+
+    digitalWrite(PUMP_OUTPUT, LOW);
+    digitalWrite(PUMP_COOLER, LOW);
+    digitalWrite(PUMP_HOT, HIGH);
+    digitalWrite(PUMP_ACID, LOW);
+    digitalWrite(PUMP_BASE, LOW);
+
+    while (tempc < 54 || (hot_water_level_state != WATER_LEVEL::EMPTY &&
+                          fish_water_level_state != WATER_LEVEL::FULL)) {
+      fish_water_level_state =
+          get_water_level(ULTRA_1_TRIG_PIN, ULTRA_1_ECHO_PIN);
+      hot_water_level_state =
+          get_water_level(ULTRA_2_TRIG_PIN, ULTRA_2_ECHO_PIN);
+      sensors.requestTemperatures();
+      tempc = sensors.getTempCByIndex(0);
+    }
+    digitalWrite(PUMP_HOT, LOW);
+  } else if (tempc > 58 && fish_water_level_state != WATER_LEVEL::FULL) {
+    digitalWrite(PUMP_OUTPUT, LOW);
+    digitalWrite(PUMP_COOLER, HIGH);
+    digitalWrite(PUMP_HOT, LOW);
+    digitalWrite(PUMP_ACID, LOW);
+    digitalWrite(PUMP_BASE, LOW);
+  } else if ((tempc < 54 && hot_water_level_state != WATER_LEVEL::EMPTY &&
+              fish_water_level_state == WATER_LEVEL::FULL) ||
+             (tempc > 58 && fish_water_level_state == WATER_LEVEL::FULL)) {
+    digitalWrite(PUMP_OUTPUT, HIGH);
+    digitalWrite(PUMP_COOLER, LOW);
+    digitalWrite(PUMP_HOT, LOW);
+  } else {
+    digitalWrite(PUMP_OUTPUT, LOW);
+    digitalWrite(PUMP_ACID, LOW);
+    digitalWrite(PUMP_BASE, LOW);
+    digitalWrite(PUMP_COOLER, LOW);
+    digitalWrite(PUMP_HOT, LOW);
+  }
+
+  if (millis() - previous_millis2 >= 15000) {
+    lcd.setCursor(0, 1);
+    lcd.print(F("Feeding Time"));
+    for (int i = 0; i <= 100; i++) {
+      myServo.write(i);
+      delay(15);
+    }
+    delay(1500);
+    for (int i = 10; i >= 0; i--) {
+      myServo.write(i);
+      delay(15);
+    }
+    previous_millis2 = millis();
+  }
+
+  if (millis() - previous_millis > 20000) {
+    String sendData =
+        "GET /update?api_key=" myAPI "&field1=" +
+        String(static_cast<int>(fish_water_level_state)) +
+        "&field2=" + String(static_cast<int>(hot_water_level_state)) +
+        "&field3=" + String(tempc) + "&field4=" + String(is_water_dirty) + "&field5=" + String(ph_value);
+    espData("AT+CIPMUX=1", 1000);  // Allow multiple connections
+    espData("AT+CIPSTART=0,\"TCP\",\"" myHOST "\"," myPORT, 1000);
+    espData("AT+CIPSEND=0," + String(sendData.length() + 4), 1000);
+    ESP_SERIAL.find(">");
+    ESP_SERIAL.println(sendData);
+
+    espData("AT+CIPCLOSE=0", 1000);
+    lcd.clear();
+    lcd.print(F("Updated channel"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Successfully"));
+    previous_millis = millis();
+  }
+}
+
+int distance_cm(int TRIG_PIN, int ECHO_PIN) {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  int duration = pulseIn(ECHO_PIN, HIGH);
+  return (duration / 2) / 29.1;
+}
+
+WATER_LEVEL get_water_level(int TRIG_PIN, int ECHO_PIN) {
+  int distance = distance_cm(TRIG_PIN, ECHO_PIN);
+
+  if (distance <= 10)  // water level full
+    return WATER_LEVEL::FULL;
+  else if (distance > 10 && distance <= 15)  // water level middle
+    return WATER_LEVEL::MIDDLE;
+
+  // water level empty
+  return WATER_LEVEL::EMPTY;
+}
+
+void getPH() {
+  for (int i = 0; i < 10; i++) {
+    buffer_arr[i] = analogRead(PH_SENSOR_PIN);
+    delay(30);
+  }
+  for (int i = 0; i < 9; i++) {
+    for (int j = i + 1; j < 10; j++) {
+      if (buffer_arr[i] > buffer_arr[j]) {
+        temp = buffer_arr[i];
+        buffer_arr[i] = buffer_arr[j];
+        buffer_arr[j] = temp;
+      }
+    }
+  }
+  avgval = 0;
+  for (int i = 2; i < 8; i++) avgval += buffer_arr[i];
+  float volt = (float)avgval * 5.0 / 1024 / 6;
+  ph_value = (-5.70 * volt + calibration_value) - 2.80;
+}
+
+void espData(const String &command, const unsigned int timeout) {
+  ESP_SERIAL.println(command);
+  unsigned long int time = millis();
+  while ((time + timeout) > millis());
+}
